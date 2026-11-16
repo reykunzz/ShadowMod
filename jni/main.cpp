@@ -151,12 +151,12 @@ static void* Sym(const char* name)
     return p;
 }
 
-ON_MOD_PRE_LOAD()
+extern "C" void OnModPreLoad()
 {
     logger->SetTag("ShadowMod");
 }
 
-ON_MOD_LOAD()
+extern "C" void OnModLoad()
 {
     LoadConfig();
     if (!cfg.enabled) { logger->Info("Enabled=0, mod tidak dipasang"); return; }
