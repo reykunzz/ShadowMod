@@ -1,4 +1,4 @@
-// ShadowMod v1.4 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
+// ShadowMod v1.5 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
 // Tiap fitur bisa dinyalakan terpisah lewat ShadowMod.ini, dan langkahnya dicatat ke ShadowMod.log
 #include <mod/amlmod.h>
 #include <mod/logger.h>
@@ -12,13 +12,14 @@
 #include <strings.h>
 #include <algorithm>
 
-MYMOD(net.kamu.shadowmod, ShadowMod, 1.4, KamuNama)
+MYMOD(net.kamu.shadowmod, ShadowMod, 1.5, KamuNama)
 
 // ============================ CONFIG ============================
 struct Config
 {
     bool  enabled       = true;
     int   resolutionBoost = 0;    // 0 = mati. 1 = resolusi 2x (512->1024), 2 = maks (semua ke 1024)
+    bool  forceAdvanced = false;  // paksa bayangan real-time menyala (MobileSettings+0xA8 = 2)
     int   boostFromPx   = 256;    // hanya kamera berukuran asli >= nilai ini yang dinaikkan
     int   boostToPx     = 512;    // ... dan <= nilai ini
     float strengthScale = 1.0f;   // 1.0 = mati. Lebih dari 1.0 = bayangan lebih gelap
@@ -37,6 +38,8 @@ static const char* kDefaultIni =
 "; Hanya kamera shadow berukuran asli di rentang ini yang dinaikkan (px). Ukuran asli di game: 16, 256, 512\n"
 "BoostFromPx=256\n"
 "BoostToPx=512\n"
+"; Paksa bayangan real-time (kualitas tinggi) menyala di semua HP: 0=mati, 1=paksa\n"
+"ForceAdvancedShadows=0\n"
 "; Kegelapan bayangan: 1.0=mati, contoh 1.3\n"
 "StrengthScale=1.0\n"
 "; Jarak max bayangan ped: 0=mati, contoh 40.0\n"
@@ -87,6 +90,7 @@ static void ParseLine(char* line)
     Trim(key); Trim(val);
 
     if      (!strcasecmp(key, "Enabled"))           cfg.enabled       = atoi(val) != 0;
+    else if (!strcasecmp(key, "ForceAdvancedShadows")) cfg.forceAdvanced = atoi(val) != 0;
     else if (!strcasecmp(key, "BoostFromPx"))       cfg.boostFromPx   = std::min(1024, std::max(1, atoi(val)));
     else if (!strcasecmp(key, "BoostToPx"))         cfg.boostToPx     = std::min(1024, std::max(1, atoi(val)));
     else if (!strcasecmp(key, "ResolutionBoost"))   cfg.resolutionBoost = std::min(2, std::max(0, atoi(val)));
@@ -121,6 +125,9 @@ static uint8_t* pLightShadowStrength = nullptr; // CTimeCycle::m_nLightShadowStr
 static uint8_t* pPoleShadowStrength  = nullptr; // CTimeCycle::m_nPoleShadowStrength  [8*23]
 static float*   pPedShadowDist       = nullptr; // MAX_DISTANCE_PED_SHADOWS
 static float*   pPedShadowDistSqr    = nullptr; // MAX_DISTANCE_PED_SHADOWS_SQR
+static uint8_t* pMobileSettings     = nullptr; // MobileSettings::settings (struct 1184 byte)
+static const int kAdvShadowOfs = 0xA8;          // field yang dibandingkan dengan 2 oleh UseAdvancedShadows / DoShadowThisFrame
+static bool     advLogged = false, advForcedLogged = false;
 
 static const int kTCSize = 8 * 23;
 static uint8_t origShadow[kTCSize], origLight[kTCSize], origPole[kTCSize];
@@ -180,6 +187,16 @@ static void Process_hook()
         ScaleArray(pLightShadowStrength, origLight,  cfg.strengthScale);
         ScaleArray(pPoleShadowStrength,  origPole,   cfg.strengthScale);
     }
+    if (pMobileSettings)
+    {
+        volatile int* adv = (volatile int*)(pMobileSettings + kAdvShadowOfs);
+        if (!advLogged) { FLog("MobileSettings+0x%X nilai awal = %d  (2 = bayangan real-time aktif)", kAdvShadowOfs, (int)*adv); advLogged = true; }
+        if (cfg.forceAdvanced && *adv != 2)
+        {
+            *adv = 2;
+            if (!advForcedLogged) { FLog("MobileSettings+0x%X dipaksa jadi 2", kAdvShadowOfs); advForcedLogged = true; }
+        }
+    }
     if (cfg.pedDistance > 0.0f)
     {
         if (pPedShadowDist)    *pPedShadowDist    = cfg.pedDistance;
@@ -205,11 +222,11 @@ extern "C" void OnModPreLoad()
 extern "C" void OnModLoad()
 {
     LoadConfig();
-    FLog("ShadowMod v1.4 start. enabled=%d resBoost=%d [%d..%d px] strength=%.2f pedDist=%.1f",
-         cfg.enabled, cfg.resolutionBoost, cfg.boostFromPx, cfg.boostToPx, cfg.strengthScale, cfg.pedDistance);
+    FLog("ShadowMod v1.5 start. enabled=%d resBoost=%d [%d..%d px] strength=%.2f pedDist=%.1f forceAdv=%d",
+         cfg.enabled, cfg.resolutionBoost, cfg.boostFromPx, cfg.boostToPx, cfg.strengthScale, cfg.pedDistance, cfg.forceAdvanced);
 
     bool needRes  = cfg.resolutionBoost > 0;
-    bool needProc = (cfg.strengthScale != 1.0f) || (cfg.pedDistance > 0.0f);
+    bool needProc = (cfg.strengthScale != 1.0f) || (cfg.pedDistance > 0.0f) || cfg.forceAdvanced;
 
     if (!cfg.enabled || (!needRes && !needProc))
     {
@@ -228,6 +245,7 @@ extern "C" void OnModLoad()
         pPoleShadowStrength  = (uint8_t*)Sym("_ZN10CTimeCycle21m_nPoleShadowStrengthE");
         pPedShadowDist       = (float*)  Sym("MAX_DISTANCE_PED_SHADOWS");
         pPedShadowDistSqr    = (float*)  Sym("MAX_DISTANCE_PED_SHADOWS_SQR");
+        pMobileSettings      = (uint8_t*)Sym("_ZN14MobileSettings8settingsE");
 
         void* fProcess = Sym("_ZN5CGame7ProcessEv");
         if (fProcess)
