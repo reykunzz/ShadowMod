@@ -1,41 +1,69 @@
-// ShadowMod v1.1 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
-// Setting dibaca dari ShadowMod.ini (dibuat otomatis kalau belum ada).
+// ShadowMod v1.2 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
+// Tiap fitur bisa dinyalakan terpisah lewat ShadowMod.ini, dan langkahnya dicatat ke ShadowMod.log
 #include <mod/amlmod.h>
 #include <mod/logger.h>
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <strings.h>
 #include <algorithm>
 
-MYMOD(net.kamu.shadowmod, ShadowMod, 1.1, KamuNama)
+MYMOD(net.kamu.shadowmod, ShadowMod, 1.2, KamuNama)
 
 // ============================ CONFIG ============================
 struct Config
 {
     bool  enabled       = true;
-    int   resolution    = 512;    // 128..1024, dibulatkan ke pangkat dua
-    float strengthScale = 1.30f;  // 0.0..3.0  (1.0 = bawaan game)
-    float pedDistance   = 40.0f;  // 1..200
+    int   resolution    = 0;      // 0 = mati. Nilai lain: 128..1024 (pangkat dua)
+    float strengthScale = 1.0f;   // 1.0 = mati. Lebih dari 1.0 = bayangan lebih gelap
+    float pedDistance   = 0.0f;   // 0 = mati. Jarak max bayangan ped
 };
 static Config cfg;
 
 static const char* kDefaultIni =
-"; ShadowMod config - GTA SA Android 2.00\n"
-"; Ubah nilai lalu restart game.\n"
+"; ShadowMod v1.2 - GTA SA Android 2.00\n"
+"; Default: semua fitur MATI (mod tidak mengubah apa-apa).\n"
+"; Nyalakan SATU per satu lalu tes, supaya ketahuan kalau ada yang bikin crash.\n"
 "[Shadow]\n"
 "Enabled=1\n"
-"; Resolusi texture shadow real-time: 256 / 512 / 1024 (makin besar makin berat)\n"
-"Resolution=512\n"
-"; 1.0 = bawaan game, lebih dari 1.0 = bayangan lebih gelap\n"
-"StrengthScale=1.30\n"
-"; Jarak maksimum bayangan ped\n"
-"PedShadowDistance=40.0\n";
+"; Resolusi texture shadow real-time: 0=mati, 256 / 512 / 1024\n"
+"Resolution=0\n"
+"; Kegelapan bayangan: 1.0=mati, contoh 1.3\n"
+"StrengthScale=1.0\n"
+"; Jarak max bayangan ped: 0=mati, contoh 40.0\n"
+"PedShadowDistance=0\n";
+
+static char gIniPath[512];
+static char gLogPath[512];
+
+static void BuildPaths()
+{
+    const char* dir = aml->GetConfigPath();
+    if (!dir || !*dir) dir = "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files/configs/";
+    const char* sep = (dir[strlen(dir) - 1] == '/') ? "" : "/";
+    snprintf(gIniPath, sizeof(gIniPath), "%s%sShadowMod.ini", dir, sep);
+    snprintf(gLogPath, sizeof(gLogPath), "%s%sShadowMod.log", dir, sep);
+}
+
+// Log ke file (dibuka-tutup tiap baris supaya tetap tersimpan walau game crash) + logcat
+static void FLog(const char* fmt, ...)
+{
+    char buf[400];
+    va_list ap; va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    logger->Info("%s", buf);
+    FILE* f = fopen(gLogPath, "a");
+    if (f) { fputs(buf, f); fputc('\n', f); fclose(f); }
+}
 
 static int RoundPow2(int v)
 {
+    if (v <= 0) return 0;
     int p = 128;
     while (p < v && p < 1024) p <<= 1;
     return p;
@@ -64,31 +92,26 @@ static void ParseLine(char* line)
     if      (!strcasecmp(key, "Enabled"))           cfg.enabled       = atoi(val) != 0;
     else if (!strcasecmp(key, "Resolution"))        cfg.resolution    = RoundPow2(atoi(val));
     else if (!strcasecmp(key, "StrengthScale"))     cfg.strengthScale = std::min(3.0f,   std::max(0.0f, (float)atof(val)));
-    else if (!strcasecmp(key, "PedShadowDistance")) cfg.pedDistance   = std::min(200.0f, std::max(1.0f, (float)atof(val)));
+    else if (!strcasecmp(key, "PedShadowDistance")) cfg.pedDistance   = std::min(200.0f, std::max(0.0f, (float)atof(val)));
 }
 
 static void LoadConfig()
 {
-    char path[512];
-    const char* dir = aml->GetConfigPath();
-    if (!dir || !*dir) dir = "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files/configs/";
-    size_t n = strlen(dir);
-    snprintf(path, sizeof(path), "%s%sShadowMod.ini", dir, (dir[n - 1] == '/') ? "" : "/");
-    logger->Info("Config: %s", path);
+    BuildPaths();
+    FILE* lf = fopen(gLogPath, "w");   // kosongkan log lama
+    if (lf) fclose(lf);
 
-    FILE* f = fopen(path, "r");
+    FILE* f = fopen(gIniPath, "r");
     if (!f)
     {
-        f = fopen(path, "w");           // buat file default
-        if (f) { fputs(kDefaultIni, f); fclose(f); logger->Info("ShadowMod.ini default dibuat"); }
-        else   { logger->Error("Tidak bisa membuat ShadowMod.ini, pakai nilai bawaan"); }
+        f = fopen(gIniPath, "w");
+        if (f) { fputs(kDefaultIni, f); fclose(f); FLog("ShadowMod.ini default dibuat: %s", gIniPath); }
+        else   { FLog("GAGAL membuat ShadowMod.ini di %s", gIniPath); }
         return;
     }
     char line[256];
     while (fgets(line, sizeof(line), f)) ParseLine(line);
     fclose(f);
-    logger->Info("Config: enabled=%d res=%d strength=%.2f pedDist=%.1f",
-                 cfg.enabled, cfg.resolution, cfg.strengthScale, cfg.pedDistance);
 }
 
 // ============================ HOOKS ============================
@@ -116,38 +139,46 @@ static void ScaleArray(uint8_t* dst, const uint8_t* src, float scale)
 static void* (*Create_orig)(void* self, int size) = nullptr;
 static void* Create_hook(void* self, int size)
 {
+    static int calls = 0;
     int newSize = std::max(size, cfg.resolution);
-    logger->Info("CShadowCamera::Create size %d -> %d", size, newSize);
+    if (calls < 8) FLog("CShadowCamera::Create dipanggil #%d: size %d -> %d", ++calls, size, newSize);
     return Create_orig(self, newSize);
 }
 
 static void (*Process_orig)() = nullptr;
 static void Process_hook()
 {
-    if (!snapshotTaken && pShadowStrength && pLightShadowStrength && pPoleShadowStrength)
+    static int frames = 0;
+    if (frames < 3) FLog("CGame::Process frame #%d (masuk hook)", ++frames);
+
+    if (cfg.strengthScale != 1.0f && pShadowStrength && pLightShadowStrength && pPoleShadowStrength)
     {
-        memcpy(origShadow, pShadowStrength,      kTCSize);
-        memcpy(origLight,  pLightShadowStrength, kTCSize);
-        memcpy(origPole,   pPoleShadowStrength,  kTCSize);
-        snapshotTaken = true;
-        logger->Info("Snapshot timecycle shadow diambil");
-    }
-    if (snapshotTaken)
-    {
+        if (!snapshotTaken)
+        {
+            memcpy(origShadow, pShadowStrength,      kTCSize);
+            memcpy(origLight,  pLightShadowStrength, kTCSize);
+            memcpy(origPole,   pPoleShadowStrength,  kTCSize);
+            snapshotTaken = true;
+            FLog("Snapshot timecycle shadow diambil");
+        }
         ScaleArray(pShadowStrength,      origShadow, cfg.strengthScale);
         ScaleArray(pLightShadowStrength, origLight,  cfg.strengthScale);
         ScaleArray(pPoleShadowStrength,  origPole,   cfg.strengthScale);
     }
-    if (pPedShadowDist)    *pPedShadowDist    = cfg.pedDistance;
-    if (pPedShadowDistSqr) *pPedShadowDistSqr = cfg.pedDistance * cfg.pedDistance;
+    if (cfg.pedDistance > 0.0f)
+    {
+        if (pPedShadowDist)    *pPedShadowDist    = cfg.pedDistance;
+        if (pPedShadowDistSqr) *pPedShadowDistSqr = cfg.pedDistance * cfg.pedDistance;
+    }
 
     Process_orig();
+    if (frames <= 3 && frames > 0) { static int done = 0; if (done < 3) FLog("CGame::Process frame #%d selesai (original OK)", ++done); }
 }
 
 static void* Sym(const char* name)
 {
     void* p = dlsym(hGTASA, name);
-    if (!p) logger->Error("Simbol TIDAK ketemu: %s", name);
+    FLog("simbol %s = %p", name, p);
     return p;
 }
 
@@ -159,22 +190,49 @@ extern "C" void OnModPreLoad()
 extern "C" void OnModLoad()
 {
     LoadConfig();
-    if (!cfg.enabled) { logger->Info("Enabled=0, mod tidak dipasang"); return; }
+    FLog("ShadowMod v1.2 start. enabled=%d resolution=%d strength=%.2f pedDist=%.1f",
+         cfg.enabled, cfg.resolution, cfg.strengthScale, cfg.pedDistance);
+
+    bool needRes  = cfg.resolution > 0;
+    bool needProc = (cfg.strengthScale != 1.0f) || (cfg.pedDistance > 0.0f);
+
+    if (!cfg.enabled || (!needRes && !needProc))
+    {
+        FLog("Tidak ada fitur aktif -> tidak ada hook dipasang. Selesai.");
+        return;
+    }
 
     hGTASA = dlopen("libGTASA.so", RTLD_LAZY);
-    if (!hGTASA) { logger->Error("dlopen libGTASA.so gagal"); return; }
+    FLog("dlopen libGTASA.so = %p", hGTASA);
+    if (!hGTASA) return;
 
-    pShadowStrength      = (uint8_t*)Sym("_ZN10CTimeCycle17m_nShadowStrengthE");
-    pLightShadowStrength = (uint8_t*)Sym("_ZN10CTimeCycle22m_nLightShadowStrengthE");
-    pPoleShadowStrength  = (uint8_t*)Sym("_ZN10CTimeCycle21m_nPoleShadowStrengthE");
-    pPedShadowDist       = (float*)  Sym("MAX_DISTANCE_PED_SHADOWS");
-    pPedShadowDistSqr    = (float*)  Sym("MAX_DISTANCE_PED_SHADOWS_SQR");
+    if (needProc)
+    {
+        pShadowStrength      = (uint8_t*)Sym("_ZN10CTimeCycle17m_nShadowStrengthE");
+        pLightShadowStrength = (uint8_t*)Sym("_ZN10CTimeCycle22m_nLightShadowStrengthE");
+        pPoleShadowStrength  = (uint8_t*)Sym("_ZN10CTimeCycle21m_nPoleShadowStrengthE");
+        pPedShadowDist       = (float*)  Sym("MAX_DISTANCE_PED_SHADOWS");
+        pPedShadowDistSqr    = (float*)  Sym("MAX_DISTANCE_PED_SHADOWS_SQR");
 
-    void* fCreate  = Sym("_ZN13CShadowCamera6CreateEi");
-    void* fProcess = Sym("_ZN5CGame7ProcessEv");
+        void* fProcess = Sym("_ZN5CGame7ProcessEv");
+        if (fProcess)
+        {
+            FLog("memasang hook CGame::Process ...");
+            aml->Hook(fProcess, (void*)Process_hook, (void**)&Process_orig);
+            FLog("hook CGame::Process terpasang, orig=%p", (void*)Process_orig);
+        }
+    }
 
-    if (fCreate)  aml->Hook(fCreate,  (void*)Create_hook,  (void**)&Create_orig);
-    if (fProcess) aml->Hook(fProcess, (void*)Process_hook, (void**)&Process_orig);
+    if (needRes)
+    {
+        void* fCreate = Sym("_ZN13CShadowCamera6CreateEi");
+        if (fCreate)
+        {
+            FLog("memasang hook CShadowCamera::Create ...");
+            aml->Hook(fCreate, (void*)Create_hook, (void**)&Create_orig);
+            FLog("hook CShadowCamera::Create terpasang, orig=%p", (void*)Create_orig);
+        }
+    }
 
-    logger->Info("ShadowMod loaded");
+    FLog("OnModLoad selesai");
 }
