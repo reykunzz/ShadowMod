@@ -1,4 +1,4 @@
-// ShadowMod v1.6 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
+// ShadowMod v1.7 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
 // Tiap fitur bisa dinyalakan terpisah lewat ShadowMod.ini, dan langkahnya dicatat ke ShadowMod.log
 #include <mod/amlmod.h>
 #include <mod/logger.h>
@@ -12,13 +12,14 @@
 #include <strings.h>
 #include <algorithm>
 
-MYMOD(net.kamu.shadowmod, ShadowMod, 1.6, KamuNama)
+MYMOD(net.kamu.shadowmod, ShadowMod, 1.7, KamuNama)
 
 // ============================ CONFIG ============================
 struct Config
 {
     bool  enabled       = true;
     int   resolutionBoost = 0;    // 0 = mati. +1 = 2x lebih tajam, +2 = 4x. Negatif = TURUNKAN (-1 = setengah, -2 = seperempat) untuk tes visual
+    float lengthScale   = 1.0f;   // 1.0 = mati. >1 = bayangan lebih panjang
     bool  forceAdvanced = false;  // paksa bayangan real-time menyala (MobileSettings+0xA8 = 2)
     int   boostFromPx   = 256;    // hanya kamera berukuran asli >= nilai ini yang dinaikkan
     int   boostToPx     = 512;    // ... dan <= nilai ini
@@ -38,6 +39,8 @@ static const char* kDefaultIni =
 "; Hanya kamera shadow berukuran asli di rentang ini yang dinaikkan (px). Ukuran asli di game: 16, 256, 512\n"
 "BoostFromPx=256\n"
 "BoostToPx=512\n"
+"; Panjang bayangan: 1.0=mati, 1.5=lebih panjang, 0.7=lebih pendek (untuk tes visual coba 3.0)\n"
+"ShadowLengthScale=1.0\n"
 "; Paksa bayangan real-time (kualitas tinggi) menyala di semua HP: 0=mati, 1=paksa\n"
 "ForceAdvancedShadows=0\n"
 "; Kegelapan bayangan: 1.0=mati, contoh 1.3\n"
@@ -90,6 +93,7 @@ static void ParseLine(char* line)
     Trim(key); Trim(val);
 
     if      (!strcasecmp(key, "Enabled"))           cfg.enabled       = atoi(val) != 0;
+    else if (!strcasecmp(key, "ShadowLengthScale")) cfg.lengthScale   = std::min(4.0f, std::max(0.2f, (float)atof(val)));
     else if (!strcasecmp(key, "ForceAdvancedShadows")) cfg.forceAdvanced = atoi(val) != 0;
     else if (!strcasecmp(key, "BoostFromPx"))       cfg.boostFromPx   = std::min(1024, std::max(1, atoi(val)));
     else if (!strcasecmp(key, "BoostToPx"))         cfg.boostToPx     = std::min(1024, std::max(1, atoi(val)));
@@ -164,6 +168,27 @@ static void* Create_hook(void* self, int size)
     return Create_orig(self, newSize);
 }
 
+// ---- Panjang bayangan: skala offset (displacement) dan vektor arah (front) yang dikirim ke fungsi shadow ----
+typedef void (*ShadowFn)(void*, float, float, float, float, float, float);
+static ShadowFn PedShadow_orig  = nullptr;
+static ShadowFn RealShadow_orig = nullptr;
+
+static void PedShadow_hook(void* e, float dx, float dy, float fx, float fy, float sx, float sy)
+{
+    static int calls = 0;
+    if (calls < 6) FLog("StoreShadowForPedObject #%d: disp(%.3f,%.3f) front(%.3f,%.3f) side(%.3f,%.3f)", ++calls, dx, dy, fx, fy, sx, sy);
+    float k = cfg.lengthScale;
+    PedShadow_orig(e, dx * k, dy * k, fx * k, fy * k, sx, sy);
+}
+
+static void RealShadow_hook(void* e, float dx, float dy, float fx, float fy, float sx, float sy)
+{
+    static int calls = 0;
+    if (calls < 6) FLog("StoreRealTimeShadow #%d: disp(%.3f,%.3f) front(%.3f,%.3f) side(%.3f,%.3f)", ++calls, dx, dy, fx, fy, sx, sy);
+    float k = cfg.lengthScale;
+    RealShadow_orig(e, dx * k, dy * k, fx * k, fy * k, sx, sy);
+}
+
 static void (*Process_orig)() = nullptr;
 static void Process_hook()
 {
@@ -222,13 +247,14 @@ extern "C" void OnModPreLoad()
 extern "C" void OnModLoad()
 {
     LoadConfig();
-    FLog("ShadowMod v1.6 start. enabled=%d resBoost=%d [%d..%d px] strength=%.2f pedDist=%.1f forceAdv=%d",
-         cfg.enabled, cfg.resolutionBoost, cfg.boostFromPx, cfg.boostToPx, cfg.strengthScale, cfg.pedDistance, cfg.forceAdvanced);
+    FLog("ShadowMod v1.6 start. enabled=%d resBoost=%d [%d..%d px] strength=%.2f pedDist=%.1f forceAdv=%d length=%.2f",
+         cfg.enabled, cfg.resolutionBoost, cfg.boostFromPx, cfg.boostToPx, cfg.strengthScale, cfg.pedDistance, cfg.forceAdvanced, cfg.lengthScale);
 
     bool needRes  = cfg.resolutionBoost != 0;
+    bool needLen  = cfg.lengthScale != 1.0f;
     bool needProc = (cfg.strengthScale != 1.0f) || (cfg.pedDistance > 0.0f) || cfg.forceAdvanced;
 
-    if (!cfg.enabled || (!needRes && !needProc))
+    if (!cfg.enabled || (!needRes && !needProc && !needLen))
     {
         FLog("Tidak ada fitur aktif -> tidak ada hook dipasang. Selesai.");
         return;
@@ -254,6 +280,14 @@ extern "C" void OnModLoad()
             aml->Hook(fProcess, (void*)Process_hook, (void**)&Process_orig);
             FLog("hook CGame::Process terpasang, orig=%p", (void*)Process_orig);
         }
+    }
+
+    if (cfg.lengthScale != 1.0f)
+    {
+        void* fPed  = Sym("_ZN8CShadows23StoreShadowForPedObjectEP7CEntityffffff");
+        void* fReal = Sym("_ZN8CShadows19StoreRealTimeShadowEP9CPhysicalffffff");
+        if (fPed)  { aml->Hook(fPed,  (void*)PedShadow_hook,  (void**)&PedShadow_orig);  FLog("hook StoreShadowForPedObject terpasang"); }
+        if (fReal) { aml->Hook(fReal, (void*)RealShadow_hook, (void**)&RealShadow_orig); FLog("hook StoreRealTimeShadow terpasang"); }
     }
 
     if (needRes)
