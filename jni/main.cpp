@@ -1,4 +1,4 @@
-// ShadowMod v1.5 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
+// ShadowMod v1.6 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
 // Tiap fitur bisa dinyalakan terpisah lewat ShadowMod.ini, dan langkahnya dicatat ke ShadowMod.log
 #include <mod/amlmod.h>
 #include <mod/logger.h>
@@ -12,13 +12,13 @@
 #include <strings.h>
 #include <algorithm>
 
-MYMOD(net.kamu.shadowmod, ShadowMod, 1.5, KamuNama)
+MYMOD(net.kamu.shadowmod, ShadowMod, 1.6, KamuNama)
 
 // ============================ CONFIG ============================
 struct Config
 {
     bool  enabled       = true;
-    int   resolutionBoost = 0;    // 0 = mati. 1 = resolusi 2x (512->1024), 2 = maks (semua ke 1024)
+    int   resolutionBoost = 0;    // 0 = mati. +1 = 2x lebih tajam, +2 = 4x. Negatif = TURUNKAN (-1 = setengah, -2 = seperempat) untuk tes visual
     bool  forceAdvanced = false;  // paksa bayangan real-time menyala (MobileSettings+0xA8 = 2)
     int   boostFromPx   = 256;    // hanya kamera berukuran asli >= nilai ini yang dinaikkan
     int   boostToPx     = 512;    // ... dan <= nilai ini
@@ -33,7 +33,7 @@ static const char* kDefaultIni =
 "; Nyalakan SATU per satu lalu tes, supaya ketahuan kalau ada yang bikin crash.\n"
 "[Shadow]\n"
 "Enabled=1\n"
-"; Resolusi shadow real-time: 0=mati, 1=naik satu tingkat (2x lebih tajam), 2=maksimum 1024\n"
+"; Resolusi shadow real-time: 0=mati, 1/2=lebih tajam, -1/-2=sengaja diturunkan (untuk tes: kalau bayangan jadi kasar, berarti hook bekerja)\n"
 "ResolutionBoost=0\n"
 "; Hanya kamera shadow berukuran asli di rentang ini yang dinaikkan (px). Ukuran asli di game: 16, 256, 512\n"
 "BoostFromPx=256\n"
@@ -93,7 +93,7 @@ static void ParseLine(char* line)
     else if (!strcasecmp(key, "ForceAdvancedShadows")) cfg.forceAdvanced = atoi(val) != 0;
     else if (!strcasecmp(key, "BoostFromPx"))       cfg.boostFromPx   = std::min(1024, std::max(1, atoi(val)));
     else if (!strcasecmp(key, "BoostToPx"))         cfg.boostToPx     = std::min(1024, std::max(1, atoi(val)));
-    else if (!strcasecmp(key, "ResolutionBoost"))   cfg.resolutionBoost = std::min(2, std::max(0, atoi(val)));
+    else if (!strcasecmp(key, "ResolutionBoost"))   cfg.resolutionBoost = std::min(2, std::max(-3, atoi(val)));
     else if (!strcasecmp(key, "StrengthScale"))     cfg.strengthScale = std::min(3.0f,   std::max(0.0f, (float)atof(val)));
     else if (!strcasecmp(key, "PedShadowDistance")) cfg.pedDistance   = std::min(200.0f, std::max(0.0f, (float)atof(val)));
 }
@@ -154,7 +154,7 @@ static void* Create_hook(void* self, int size)
         int px = 1 << size;
         if (px >= cfg.boostFromPx && px <= cfg.boostToPx)
         {
-            newSize = std::min(10, size + cfg.resolutionBoost);   // maks 2^10 = 1024 px
+            newSize = std::max(6, std::min(10, size + cfg.resolutionBoost));   // antara 2^6 = 64 px dan 2^10 = 1024 px
             boosted = (newSize != size);
         }
     }
@@ -222,10 +222,10 @@ extern "C" void OnModPreLoad()
 extern "C" void OnModLoad()
 {
     LoadConfig();
-    FLog("ShadowMod v1.5 start. enabled=%d resBoost=%d [%d..%d px] strength=%.2f pedDist=%.1f forceAdv=%d",
+    FLog("ShadowMod v1.6 start. enabled=%d resBoost=%d [%d..%d px] strength=%.2f pedDist=%.1f forceAdv=%d",
          cfg.enabled, cfg.resolutionBoost, cfg.boostFromPx, cfg.boostToPx, cfg.strengthScale, cfg.pedDistance, cfg.forceAdvanced);
 
-    bool needRes  = cfg.resolutionBoost > 0;
+    bool needRes  = cfg.resolutionBoost != 0;
     bool needProc = (cfg.strengthScale != 1.0f) || (cfg.pedDistance > 0.0f) || cfg.forceAdvanced;
 
     if (!cfg.enabled || (!needRes && !needProc))
