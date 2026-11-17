@@ -1,4 +1,4 @@
-// ShadowMod v1.3 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
+// ShadowMod v1.4 - realistic shadows for GTA SA Android v2.00 (armeabi-v7a)
 // Tiap fitur bisa dinyalakan terpisah lewat ShadowMod.ini, dan langkahnya dicatat ke ShadowMod.log
 #include <mod/amlmod.h>
 #include <mod/logger.h>
@@ -12,13 +12,15 @@
 #include <strings.h>
 #include <algorithm>
 
-MYMOD(net.kamu.shadowmod, ShadowMod, 1.3, KamuNama)
+MYMOD(net.kamu.shadowmod, ShadowMod, 1.4, KamuNama)
 
 // ============================ CONFIG ============================
 struct Config
 {
     bool  enabled       = true;
     int   resolutionBoost = 0;    // 0 = mati. 1 = resolusi 2x (512->1024), 2 = maks (semua ke 1024)
+    int   boostFromPx   = 256;    // hanya kamera berukuran asli >= nilai ini yang dinaikkan
+    int   boostToPx     = 512;    // ... dan <= nilai ini
     float strengthScale = 1.0f;   // 1.0 = mati. Lebih dari 1.0 = bayangan lebih gelap
     float pedDistance   = 0.0f;   // 0 = mati. Jarak max bayangan ped
 };
@@ -32,6 +34,9 @@ static const char* kDefaultIni =
 "Enabled=1\n"
 "; Resolusi shadow real-time: 0=mati, 1=naik satu tingkat (2x lebih tajam), 2=maksimum 1024\n"
 "ResolutionBoost=0\n"
+"; Hanya kamera shadow berukuran asli di rentang ini yang dinaikkan (px). Ukuran asli di game: 16, 256, 512\n"
+"BoostFromPx=256\n"
+"BoostToPx=512\n"
 "; Kegelapan bayangan: 1.0=mati, contoh 1.3\n"
 "StrengthScale=1.0\n"
 "; Jarak max bayangan ped: 0=mati, contoh 40.0\n"
@@ -82,6 +87,8 @@ static void ParseLine(char* line)
     Trim(key); Trim(val);
 
     if      (!strcasecmp(key, "Enabled"))           cfg.enabled       = atoi(val) != 0;
+    else if (!strcasecmp(key, "BoostFromPx"))       cfg.boostFromPx   = std::min(1024, std::max(1, atoi(val)));
+    else if (!strcasecmp(key, "BoostToPx"))         cfg.boostToPx     = std::min(1024, std::max(1, atoi(val)));
     else if (!strcasecmp(key, "ResolutionBoost"))   cfg.resolutionBoost = std::min(2, std::max(0, atoi(val)));
     else if (!strcasecmp(key, "StrengthScale"))     cfg.strengthScale = std::min(3.0f,   std::max(0.0f, (float)atof(val)));
     else if (!strcasecmp(key, "PedShadowDistance")) cfg.pedDistance   = std::min(200.0f, std::max(0.0f, (float)atof(val)));
@@ -134,18 +141,30 @@ static void* Create_hook(void* self, int size)
 {
     static int calls = 0;
     int newSize = size;
-    if (size >= 4 && size <= 10)                       // hanya ubah kalau terlihat seperti eksponen wajar
-        newSize = std::min(10, size + cfg.resolutionBoost);   // maks 2^10 = 1024 px
-    if (calls < 16) FLog("CShadowCamera::Create #%d: eksp %d -> %d (%d px -> %d px)",
-                         ++calls, size, newSize, 1 << (size & 15), 1 << (newSize & 15));
+    bool boosted = false;
+    if (size >= 4 && size <= 10)
+    {
+        int px = 1 << size;
+        if (px >= cfg.boostFromPx && px <= cfg.boostToPx)
+        {
+            newSize = std::min(10, size + cfg.resolutionBoost);   // maks 2^10 = 1024 px
+            boosted = (newSize != size);
+        }
+    }
+    if (calls < 24) FLog("CShadowCamera::Create #%d: eksp %d -> %d (%d px -> %d px) %s",
+                         ++calls, size, newSize, 1 << (size & 15), 1 << (newSize & 15),
+                         boosted ? "[DINAIKKAN]" : "[dibiarkan]");
     return Create_orig(self, newSize);
 }
 
 static void (*Process_orig)() = nullptr;
 static void Process_hook()
 {
-    static int frames = 0;
-    if (frames < 3) FLog("CGame::Process frame #%d (masuk hook)", ++frames);
+    static unsigned frames = 0;
+    ++frames;
+    bool mark = (frames <= 3) || frames == 10 || frames == 30 || frames == 100 || frames == 300 ||
+                frames == 1000 || frames == 3000 || frames == 10000;
+    if (mark) FLog("frame #%u masuk", frames);
 
     if (cfg.strengthScale != 1.0f && pShadowStrength && pLightShadowStrength && pPoleShadowStrength)
     {
@@ -168,7 +187,7 @@ static void Process_hook()
     }
 
     Process_orig();
-    if (frames <= 3 && frames > 0) { static int done = 0; if (done < 3) FLog("CGame::Process frame #%d selesai (original OK)", ++done); }
+    if (mark) FLog("frame #%u selesai", frames);
 }
 
 static void* Sym(const char* name)
@@ -186,8 +205,8 @@ extern "C" void OnModPreLoad()
 extern "C" void OnModLoad()
 {
     LoadConfig();
-    FLog("ShadowMod v1.3 start. enabled=%d resBoost=%d strength=%.2f pedDist=%.1f",
-         cfg.enabled, cfg.resolutionBoost, cfg.strengthScale, cfg.pedDistance);
+    FLog("ShadowMod v1.4 start. enabled=%d resBoost=%d [%d..%d px] strength=%.2f pedDist=%.1f",
+         cfg.enabled, cfg.resolutionBoost, cfg.boostFromPx, cfg.boostToPx, cfg.strengthScale, cfg.pedDistance);
 
     bool needRes  = cfg.resolutionBoost > 0;
     bool needProc = (cfg.strengthScale != 1.0f) || (cfg.pedDistance > 0.0f);
